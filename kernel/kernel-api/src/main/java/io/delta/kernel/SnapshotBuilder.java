@@ -149,6 +149,19 @@ public interface SnapshotBuilder {
   SnapshotBuilder withMaxCatalogVersion(long version);
 
   /**
+   * Controls whether snapshot construction captures the extended contents of the {@code
+   * _last_checkpoint} file.
+   *
+   * <p>The default is {@code false}. When enabled, Kernel uses the extended projection for the
+   * initial checkpoint-hint read and makes the result available through {@link
+   * Snapshot#getExtendedLastCheckpoint()}; it does not perform a second read.
+   *
+   * @param enabled whether to capture extended last-checkpoint information
+   * @return a new builder instance configured with the requested behavior
+   */
+  SnapshotBuilder withExtendedLastCheckpoint(boolean enabled);
+
+  /**
    * Constructs the {@link Snapshot} using the provided engine.
    *
    * <p>This method will read any missing information from the filesystem using the provided engine

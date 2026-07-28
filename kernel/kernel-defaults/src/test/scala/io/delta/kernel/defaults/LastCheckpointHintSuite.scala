@@ -20,6 +20,7 @@ import java.nio.file.{Files, Paths}
 import java.util.Optional
 
 import io.delta.golden.GoldenTableUtils.goldenTablePath
+import io.delta.kernel.TableManager
 import io.delta.kernel.defaults.engine.DefaultEngine
 import io.delta.kernel.internal.checkpoints.Checkpointer
 import io.delta.kernel.internal.fs.Path
@@ -29,9 +30,7 @@ import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 
 /**
- * End-to-end tests for `Checkpointer.readLastCheckpointFile` capturing the columnar fields of the
- * `_last_checkpoint` pointer (including the V2 checkpoint block) and re-serializing them via
- * `CheckpointMetaData.toJson`.
+ * End-to-end tests for opt-in capture of the extended `_last_checkpoint` columnar fields.
  *
  * Uses the real `DefaultJsonHandler` against the golden `_last_checkpoint` fixtures so the schema
  * projection, nested-struct/array parsing, and JSON serialization are all exercised together.
@@ -42,6 +41,19 @@ import org.scalatest.funsuite.AnyFunSuite
 class LastCheckpointHintSuite extends AnyFunSuite {
 
   private val engine = DefaultEngine.create(new Configuration())
+
+  test("snapshot captures extended last checkpoint only when requested") {
+    val tablePath = goldenTablePath("v2-checkpoint-json")
+
+    val defaultSnapshot = TableManager.loadSnapshot(tablePath).build(engine)
+    assert(!defaultSnapshot.getExtendedLastCheckpoint.isPresent)
+
+    val extendedSnapshot = TableManager.loadSnapshot(tablePath)
+      .withExtendedLastCheckpoint(true)
+      .build(engine)
+    assert(extendedSnapshot.getExtendedLastCheckpoint.isPresent)
+    assert(extendedSnapshot.getExtendedLastCheckpoint.get().getVersion == 2L)
+  }
 
   /** Parses two JSON strings and asserts semantic equality (object key order is irrelevant). */
   private def assertJsonEquals(expected: String, actual: String): Unit = {
@@ -73,21 +85,21 @@ class LastCheckpointHintSuite extends AnyFunSuite {
     new String(bytes, StandardCharsets.UTF_8).trim
   }
 
-  test("readLastCheckpointFile captures the full V2 (json format) pointer and round-trips it") {
+  test("readExtendedLastCheckpointFile captures full V2 fields and round-trips them") {
     val logPath = logPathFor("v2-checkpoint-json")
     val expectedJson = readLastCheckpoint(logPath)
 
-    val cpmOpt = new Checkpointer(logPath).readLastCheckpointFile(engine)
+    val cpmOpt = new Checkpointer(logPath).readExtendedLastCheckpointFile(engine)
     assert(cpmOpt.isPresent, "expected to read the _last_checkpoint pointer")
     val cpm = cpmOpt.get()
 
-    assert(cpm.version == 2L)
-    assert(cpm.size == 9L)
-    assert(cpm.sizeInBytes == Optional.of(19554L))
-    assert(cpm.numOfAddFiles == Optional.of(4L))
-    assert(cpm.checksum.isPresent)
-    assert(!cpm.parts.isPresent, "V2 pointer has no `parts`")
-    assert(cpm.v2Checkpoint.isPresent, "V2 pointer must carry the v2Checkpoint block")
+    assert(cpm.getVersion == 2L)
+    assert(cpm.getSize == 9L)
+    assert(cpm.getSizeInBytes == Optional.of(19554L))
+    assert(cpm.getNumOfAddFiles == Optional.of(4L))
+    assert(cpm.getChecksum.isPresent)
+    assert(!cpm.getParts.isPresent, "V2 pointer has no `parts`")
+    assert(cpm.getV2Checkpoint.isPresent, "V2 pointer must carry the v2Checkpoint block")
 
     val actualJson = cpm.toJson()
     assert(actualJson.contains("v2Checkpoint"))
@@ -104,11 +116,11 @@ class LastCheckpointHintSuite extends AnyFunSuite {
     val logPath = logPathFor("v2-checkpoint-parquet")
     val rawJson = readLastCheckpoint(logPath)
 
-    val cpm = new Checkpointer(logPath).readLastCheckpointFile(engine).get()
-    assert(cpm.version == 2L)
-    assert(cpm.v2Checkpoint.isPresent)
-    assert(cpm.sizeInBytes.isPresent)
-    assert(cpm.numOfAddFiles.isPresent)
+    val cpm = new Checkpointer(logPath).readExtendedLastCheckpointFile(engine).get()
+    assert(cpm.getVersion == 2L)
+    assert(cpm.getV2Checkpoint.isPresent)
+    assert(cpm.getSizeInBytes.isPresent)
+    assert(cpm.getNumOfAddFiles.isPresent)
 
     val actualJson = cpm.toJson()
     assert(!actualJson.contains("checkpointSchema"), "kernel does not capture checkpointSchema")
@@ -121,14 +133,14 @@ class LastCheckpointHintSuite extends AnyFunSuite {
     val logPath = logPathFor("spark-variant-checkpoint")
     val raw = readLastCheckpoint(logPath)
 
-    val cpm = new Checkpointer(logPath).readLastCheckpointFile(engine).get()
-    assert(cpm.version == 2L)
-    assert(cpm.size == 6L)
-    assert(cpm.sizeInBytes == Optional.of(21929L))
-    assert(cpm.numOfAddFiles == Optional.of(4L))
-    assert(cpm.checksum == Optional.of("a8d400a03ead8a86dbb412f2a693e26e"))
-    assert(!cpm.parts.isPresent, "classic pointer here has no `parts`")
-    assert(!cpm.v2Checkpoint.isPresent, "classic pointer has no v2Checkpoint")
+    val cpm = new Checkpointer(logPath).readExtendedLastCheckpointFile(engine).get()
+    assert(cpm.getVersion == 2L)
+    assert(cpm.getSize == 6L)
+    assert(cpm.getSizeInBytes == Optional.of(21929L))
+    assert(cpm.getNumOfAddFiles == Optional.of(4L))
+    assert(cpm.getChecksum == Optional.of("a8d400a03ead8a86dbb412f2a693e26e"))
+    assert(!cpm.getParts.isPresent, "classic pointer here has no `parts`")
+    assert(!cpm.getV2Checkpoint.isPresent, "classic pointer has no v2Checkpoint")
 
     val actual = cpm.toJson()
     assert(!actual.contains("checkpointSchema"), "kernel does not capture checkpointSchema")

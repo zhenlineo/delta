@@ -22,6 +22,7 @@ import static io.delta.kernel.internal.snapshot.MetadataCleanup.cleanupExpiredLo
 import static io.delta.kernel.internal.tablefeatures.TableFeatures.CHECKPOINT_PROTECTION_W_FEATURE;
 import static io.delta.kernel.internal.util.Utils.singletonCloseableIterator;
 
+import io.delta.kernel.ExtendedLastCheckpoint;
 import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.engine.Engine;
@@ -279,7 +280,23 @@ public class Checkpointer {
 
   /** Returns information about the most recent checkpoint. */
   public Optional<CheckpointMetaData> readLastCheckpointFile(Engine engine) {
-    return loadMetadataFromFile(engine, 0 /* tries */);
+    return readLastCheckpointFile(engine, false /* extended */);
+  }
+
+  /**
+   * Returns information about the most recent checkpoint, using the extended projection when
+   * requested. In extended mode the returned value is an {@link ExtendedLastCheckpoint}.
+   */
+  public Optional<CheckpointMetaData> readLastCheckpointFile(Engine engine, boolean extended) {
+    Optional<CheckpointMetaData> metadataOpt =
+        loadMetadataFromFile(engine, 0 /* tries */, extended);
+    return extended ? metadataOpt.map(ExtendedLastCheckpoint::new) : metadataOpt;
+  }
+
+  /** Returns extended information from the most recent checkpoint. */
+  public Optional<ExtendedLastCheckpoint> readExtendedLastCheckpointFile(Engine engine) {
+    return readLastCheckpointFile(engine, true /* extended */)
+        .map(metadata -> (ExtendedLastCheckpoint) metadata);
   }
 
   /**
@@ -311,7 +328,8 @@ public class Checkpointer {
    * @param engine {@link Engine instance to use}
    * @param tries Number of times already tried to load the metadata before this call.
    */
-  private Optional<CheckpointMetaData> loadMetadataFromFile(Engine engine, int tries) {
+  private Optional<CheckpointMetaData> loadMetadataFromFile(
+      Engine engine, int tries, boolean extended) {
     if (tries >= READ_LAST_CHECKPOINT_FILE_MAX_RETRIES) {
       // We have tried 3 times and failed. Assume the checkpoint metadata file is corrupt.
       logger.warn(
@@ -339,12 +357,17 @@ public class Checkpointer {
                       .getJsonHandler()
                       .readJsonFiles(
                           singletonCloseableIterator(lastCheckpointFile),
-                          CheckpointMetaData.READ_SCHEMA,
+                          extended
+                              ? CheckpointMetaData.READ_SCHEMA
+                              : CheckpointMetaData.BASIC_READ_SCHEMA,
                           Optional.empty()),
               "Reading the last checkpoint file as JSON")) {
         Optional<Row> checkpointRow = InternalUtils.getSingularRow(jsonIter);
         if (checkpointRow.isPresent()) {
-          return Optional.of(CheckpointMetaData.fromRow(checkpointRow.get()));
+          return Optional.of(
+              extended
+                  ? CheckpointMetaData.fromRow(checkpointRow.get())
+                  : CheckpointMetaData.fromBasicRow(checkpointRow.get()));
         }
 
         // Checkpoint has no data. This is a valid case on some file systems where the
@@ -360,7 +383,7 @@ public class Checkpointer {
           Thread.currentThread().interrupt();
           return Optional.empty();
         }
-        return loadMetadataFromFile(engine, tries + 1);
+        return loadMetadataFromFile(engine, tries + 1, extended);
       }
     } catch (Exception e) {
       if (e instanceof FileNotFoundException
@@ -378,7 +401,7 @@ public class Checkpointer {
       // we can retry until max tries are exhausted. It saves latency as the alternative
       // is to list files and find the last checkpoint file. And the `_last_checkpoint`
       // file is possibly being written to.
-      return loadMetadataFromFile(engine, tries + 1);
+      return loadMetadataFromFile(engine, tries + 1, extended);
     }
   }
 }

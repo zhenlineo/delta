@@ -53,6 +53,7 @@ public class SnapshotBuilderImpl implements SnapshotBuilder {
     public List<ParsedLogData> logDatas = Collections.emptyList();
     public Optional<Tuple2<Protocol, Metadata>> protocolAndMetadataOpt = Optional.empty();
     public Optional<Long> maxCatalogVersion = Optional.empty();
+    public boolean captureExtendedLastCheckpoint = false;
 
     public Context(String unresolvedPath) {
       this.unresolvedPath = requireNonNull(unresolvedPath, "unresolvedPath is null");
@@ -111,6 +112,12 @@ public class SnapshotBuilderImpl implements SnapshotBuilder {
   public SnapshotBuilderImpl withMaxCatalogVersion(long version) {
     checkArgument(version >= 0, "A valid version must be >= 0");
     ctx.maxCatalogVersion = Optional.of(version);
+    return this;
+  }
+
+  @Override
+  public SnapshotBuilderImpl withExtendedLastCheckpoint(boolean enabled) {
+    ctx.captureExtendedLastCheckpoint = enabled;
     return this;
   }
 

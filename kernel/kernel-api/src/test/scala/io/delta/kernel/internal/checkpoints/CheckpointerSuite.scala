@@ -20,6 +20,7 @@ import java.util.Optional
 
 import scala.util.control.NonFatal
 
+import io.delta.kernel.ExtendedLastCheckpoint
 import io.delta.kernel.data.{ColumnarBatch, ColumnVector, Row}
 import io.delta.kernel.exceptions.KernelEngineException
 import io.delta.kernel.expressions.Predicate
@@ -77,6 +78,18 @@ class CheckpointerSuite extends AnyFunSuite with MockFileSystemClientUtils {
       .readLastCheckpointFile(mockEngine(jsonHandler = jsonHandler))
     assertValidCheckpointMetadata(lastCheckpoint)
     assert(jsonHandler.currentFailCount == 0)
+    assert(jsonHandler.lastReadSchema == CheckpointMetaData.BASIC_READ_SCHEMA)
+  }
+
+  test("load extended last checkpoint metadata only when explicitly requested") {
+    val jsonHandler = new MockLastCheckpointMetadataFileReader(maxFailures = 0)
+    val lastCheckpoint = new Checkpointer(VALID_LAST_CHECKPOINT_FILE_TABLE)
+      .readLastCheckpointFile(mockEngine(jsonHandler = jsonHandler), true)
+    assert(lastCheckpoint.isPresent)
+    assert(lastCheckpoint.get().isInstanceOf[ExtendedLastCheckpoint])
+    assert(lastCheckpoint.get().version == 40L)
+    assert(lastCheckpoint.get().size == 44L)
+    assert(jsonHandler.lastReadSchema == CheckpointMetaData.READ_SCHEMA)
   }
 
   test("load a zero-sized last checkpoint metadata file") {
@@ -360,6 +373,19 @@ object CheckpointerSuite extends VectorTestUtils {
     override def getSize: Int = 1
   }
 
+  val SAMPLE_BASIC_LAST_CHECKPOINT_FILE_CONTENT: ColumnarBatch = new ColumnarBatch {
+    override def getSchema: StructType = CheckpointMetaData.BASIC_READ_SCHEMA
+
+    override def getColumnVector(ordinal: Int): ColumnVector = ordinal match {
+      case 0 => longVector(Seq(40))
+      case 1 => longVector(Seq(44))
+      case 2 => longVector(Seq(20))
+      case 3 => mapTypeVector(Seq(Map.empty[String, String]))
+    }
+
+    override def getSize: Int = 1
+  }
+
   val ZERO_ENTRIES_COLUMNAR_BATCH: ColumnarBatch = new ColumnarBatch {
     override def getSchema: StructType = CheckpointMetaData.READ_SCHEMA
 
@@ -379,11 +405,13 @@ object CheckpointerSuite extends VectorTestUtils {
 class MockLastCheckpointMetadataFileReader(maxFailures: Int) extends BaseMockJsonHandler {
   import CheckpointerSuite._
   var currentFailCount = 0
+  var lastReadSchema: StructType = _
 
   override def readJsonFiles(
       fileIter: CloseableIterator[FileStatus],
       physicalSchema: StructType,
       predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
+    lastReadSchema = physicalSchema
     val file = fileIter.next()
     val path = new Path(file.getPath)
 
@@ -395,7 +423,12 @@ class MockLastCheckpointMetadataFileReader(maxFailures: Int) extends BaseMockJso
         }
 
         path.getParent match {
-          case VALID_LAST_CHECKPOINT_FILE_TABLE => SAMPLE_LAST_CHECKPOINT_FILE_CONTENT
+          case VALID_LAST_CHECKPOINT_FILE_TABLE =>
+            if (physicalSchema == CheckpointMetaData.BASIC_READ_SCHEMA) {
+              SAMPLE_BASIC_LAST_CHECKPOINT_FILE_CONTENT
+            } else {
+              SAMPLE_LAST_CHECKPOINT_FILE_CONTENT
+            }
           case ZERO_SIZED_LAST_CHECKPOINT_FILE_TABLE => ZERO_ENTRIES_COLUMNAR_BATCH
           case INVALID_LAST_CHECKPOINT_FILE_TABLE =>
             throw new IOException("Invalid last checkpoint file")

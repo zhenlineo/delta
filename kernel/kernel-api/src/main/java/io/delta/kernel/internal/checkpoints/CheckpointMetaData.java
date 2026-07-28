@@ -35,6 +35,17 @@ import java.util.*;
 
 public class CheckpointMetaData {
 
+  /** The minimal projection used by normal snapshot construction. */
+  public static final StructType BASIC_READ_SCHEMA =
+      new StructType()
+          .add("version", LongType.LONG, false /* nullable */)
+          .add("size", LongType.LONG, false /* nullable */)
+          .add("parts", LongType.LONG, true /* nullable */)
+          .add(
+              "tags",
+              new MapType(StringType.STRING, StringType.STRING, false),
+              true /* nullable */);
+
   /** Schema of a single entry of {@code v2Checkpoint.nonFileActions}. */
   private static final StructType NON_FILE_ACTION_SCHEMA =
       new StructType()
@@ -103,6 +114,15 @@ public class CheckpointMetaData {
             ? Optional.empty()
             : Optional.of(row.getString(CHECKSUM_ORDINAL)),
         row.isNullAt(TAGS_ORDINAL) ? Map.of() : toJavaMap(row.getMap(TAGS_ORDINAL)));
+  }
+
+  /** Creates checkpoint metadata from the minimal projection used by default snapshot loads. */
+  public static CheckpointMetaData fromBasicRow(Row row) {
+    return new CheckpointMetaData(
+        row.getLong(0),
+        row.getLong(1),
+        row.isNullAt(2) ? Optional.empty() : Optional.of(row.getLong(2)),
+        row.isNullAt(3) ? Map.of() : toJavaMap(row.getMap(3)));
   }
 
   public final long version;

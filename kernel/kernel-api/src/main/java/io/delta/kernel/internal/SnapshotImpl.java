@@ -20,6 +20,7 @@ import static io.delta.kernel.internal.TableConfig.TOMBSTONE_RETENTION;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
+import io.delta.kernel.ExtendedLastCheckpoint;
 import io.delta.kernel.Operation;
 import io.delta.kernel.ScanBuilder;
 import io.delta.kernel.Snapshot;
@@ -78,6 +79,7 @@ public class SnapshotImpl implements Snapshot {
   private final Protocol protocol;
   private final Metadata metadata;
   private final Committer committer;
+  private final Optional<ExtendedLastCheckpoint> extendedLastCheckpoint;
 
   /**
    * If this snapshot does not have the InCommitTimestamp (ICT) table feature enabled, then this is
@@ -115,6 +117,30 @@ public class SnapshotImpl implements Snapshot {
       Committer committer,
       SnapshotQueryContext snapshotContext,
       Optional<Long> inCommitTimestampOpt) {
+    this(
+        dataPath,
+        version,
+        lazyLogSegment,
+        logReplay,
+        protocol,
+        metadata,
+        committer,
+        snapshotContext,
+        inCommitTimestampOpt,
+        Optional.empty());
+  }
+
+  public SnapshotImpl(
+      Path dataPath,
+      long version,
+      Lazy<LogSegment> lazyLogSegment,
+      LogReplay logReplay,
+      Protocol protocol,
+      Metadata metadata,
+      Committer committer,
+      SnapshotQueryContext snapshotContext,
+      Optional<Long> inCommitTimestampOpt,
+      Optional<ExtendedLastCheckpoint> extendedLastCheckpoint) {
     checkArgument(version >= 0, "A snapshot cannot have version < 0");
     this.logPath = new Path(dataPath, "_delta_log");
     this.dataPath = dataPath;
@@ -124,6 +150,7 @@ public class SnapshotImpl implements Snapshot {
     this.protocol = requireNonNull(protocol);
     this.metadata = requireNonNull(metadata);
     this.committer = committer;
+    this.extendedLastCheckpoint = requireNonNull(extendedLastCheckpoint);
     this.inCommitTimestampOpt = inCommitTimestampOpt;
     // TODO: Post-commit snapshots build a version-based SnapshotQueryContext
     // (see TransactionImpl.buildPostCommitSnapshotOpt), so isLatestQuery() may be false even
@@ -149,6 +176,11 @@ public class SnapshotImpl implements Snapshot {
             () ->
                 getPhysicalClusteringColumns()
                     .map(physCols -> ClusteringColumnInfo.resolveAll(getSchema(), physCols)));
+  }
+
+  @Override
+  public Optional<ExtendedLastCheckpoint> getExtendedLastCheckpoint() {
+    return extendedLastCheckpoint;
   }
 
   /////////////////

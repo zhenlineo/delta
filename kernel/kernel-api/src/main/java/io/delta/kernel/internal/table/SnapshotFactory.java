@@ -19,6 +19,7 @@ package io.delta.kernel.internal.table;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static io.delta.kernel.internal.util.Utils.resolvePath;
 
+import io.delta.kernel.ExtendedLastCheckpoint;
 import io.delta.kernel.Snapshot;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.internal.DeltaHistoryManager;
@@ -42,6 +43,7 @@ import io.delta.kernel.internal.tablefeatures.TableFeatures;
 import io.delta.kernel.utils.FileStatus;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -184,8 +186,10 @@ public class SnapshotFactory {
 
   private SnapshotImpl createSnapshot(Engine engine, SnapshotQueryContext snapshotCtx) {
     final Optional<Long> timeTravelVersion = getTargetTimeTravelVersion(engine, snapshotCtx);
+    final AtomicReference<Optional<ExtendedLastCheckpoint>> extendedLastCheckpointRef =
+        new AtomicReference<>(Optional.empty());
     final Lazy<LogSegment> lazyLogSegment =
-        getLazyLogSegment(engine, snapshotCtx, timeTravelVersion);
+        getLazyLogSegment(engine, snapshotCtx, timeTravelVersion, extendedLastCheckpointRef);
     final Lazy<Optional<CRCInfo>> lazyCrcInfo =
         createLazyChecksumFileLoaderWithMetrics(
             engine, lazyLogSegment, snapshotCtx.getSnapshotMetrics());
@@ -224,7 +228,8 @@ public class SnapshotFactory {
         metadata,
         ctx.committerOpt.orElse(DefaultFileSystemManagedTableOnlyCommitter.INSTANCE),
         snapshotCtx,
-        Optional.empty() /* inCommitTimestampOpt */);
+        Optional.empty() /* inCommitTimestampOpt */,
+        extendedLastCheckpointRef.get());
   }
 
   private SnapshotQueryContext getSnapshotQueryContext() {
@@ -239,7 +244,10 @@ public class SnapshotFactory {
   }
 
   private Lazy<LogSegment> getLazyLogSegment(
-      Engine engine, SnapshotQueryContext snapshotCtx, Optional<Long> timeTravelVersion) {
+      Engine engine,
+      SnapshotQueryContext snapshotCtx,
+      Optional<Long> timeTravelVersion,
+      AtomicReference<Optional<ExtendedLastCheckpoint>> extendedLastCheckpointRef) {
     return new Lazy<>(
         () -> {
           final LogSegment logSegment =
@@ -250,7 +258,12 @@ public class SnapshotFactory {
                       () ->
                           new SnapshotManager(tablePath)
                               .getLogSegmentForVersion(
-                                  engine, timeTravelVersion, ctx.logDatas, ctx.maxCatalogVersion));
+                                  engine,
+                                  timeTravelVersion,
+                                  ctx.logDatas,
+                                  ctx.maxCatalogVersion,
+                                  ctx.captureExtendedLastCheckpoint,
+                                  extendedLastCheckpointRef::set));
 
           snapshotCtx.setResolvedVersion(logSegment.getVersion());
           snapshotCtx.setCheckpointVersion(logSegment.getCheckpointVersionOpt());

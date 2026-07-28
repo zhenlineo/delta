@@ -81,6 +81,17 @@ public interface Snapshot {
   long getVersion();
 
   /**
+   * Returns the extended {@code _last_checkpoint} contents used to select this snapshot's starting
+   * checkpoint, when capture was explicitly enabled on the {@link SnapshotBuilder}.
+   *
+   * <p>The result is empty when capture was disabled, when no usable {@code _last_checkpoint} was
+   * found, or when snapshot construction did not use the checkpoint referenced by that file.
+   */
+  default Optional<ExtendedLastCheckpoint> getExtendedLastCheckpoint() {
+    return Optional.empty();
+  }
+
+  /**
    * Get the names of the partition columns in the Delta table at this snapshot.
    *
    * <p>The partition column names are returned in the order they are defined in the Delta table

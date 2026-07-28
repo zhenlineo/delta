@@ -41,6 +41,8 @@ import io.delta.kernel.internal.util.FileNames.DeltaLogFileType;
 import io.delta.kernel.internal.util.Tuple2;
 import io.delta.kernel.utils.FileStatus;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -221,6 +223,26 @@ public class SnapshotManager {
       Optional<Long> timeTravelVersionOpt,
       List<ParsedLogData> parsedLogDatas,
       Optional<Long> maxCatalogVersionOpt) {
+    return getLogSegmentForVersion(
+        engine,
+        timeTravelVersionOpt,
+        parsedLogDatas,
+        maxCatalogVersionOpt,
+        false /* captureExtendedLastCheckpoint */,
+        ignored -> {});
+  }
+
+  /**
+   * Builds a log segment and optionally captures the extended last-checkpoint value from the same
+   * read used to select its starting checkpoint.
+   */
+  public LogSegment getLogSegmentForVersion(
+      Engine engine,
+      Optional<Long> timeTravelVersionOpt,
+      List<ParsedLogData> parsedLogDatas,
+      Optional<Long> maxCatalogVersionOpt,
+      boolean captureExtendedLastCheckpoint,
+      Consumer<Optional<ExtendedLastCheckpoint>> extendedLastCheckpointConsumer) {
     // This is the actual version we want to load. For "latest" (aka non-time-travel) queries for
     // catalogManaged tables we want to load the maxCatalogVersion
     final Optional<Long> versionToLoadOpt =
@@ -235,14 +257,23 @@ public class SnapshotManager {
     // search for the previous latest complete checkpoint at or before the version to load.  //
     ///////////////////////////////////////////////////////////////////////////////////////////
 
+    final AtomicReference<Optional<ExtendedLastCheckpoint>> extendedLastCheckpointRef =
+        new AtomicReference<>(Optional.empty());
     final Optional<Long> startCheckpointVersionOpt =
-        getStartCheckpointVersion(engine, timeTravelVersionOpt, maxCatalogVersionOpt);
+        getStartCheckpointVersion(
+            engine,
+            timeTravelVersionOpt,
+            maxCatalogVersionOpt,
+            captureExtendedLastCheckpoint,
+            extendedLastCheckpointRef);
 
     // Primary attempt to build the log segment
     Optional<LogSegment> result =
         buildLogSegmentFromStartCheckpointVersion(
             engine, startCheckpointVersionOpt, versionToLoadOpt, parsedLogDatas);
     if (result.isPresent()) {
+      publishExtendedLastCheckpoint(
+          result.get(), extendedLastCheckpointRef.get(), extendedLastCheckpointConsumer);
       logger.info(
           "Successfully constructed LogSegment at version {}, took {}ms",
           result.get().getVersion(),
@@ -264,6 +295,8 @@ public class SnapshotManager {
             buildLogSegmentFromStartCheckpointVersion(
                 engine, fallbackStart, versionToLoadOpt, parsedLogDatas);
         if (fallbackResult.isPresent()) {
+          // The checkpoint from _last_checkpoint was not used, so do not expose its extended data.
+          extendedLastCheckpointConsumer.accept(Optional.empty());
           logger.info(
               "{}: Fallback successfully constructed LogSegment at version {} "
                   + "(stale checkpoint was at version {}), took {}ms",
@@ -295,6 +328,18 @@ public class SnapshotManager {
     }
     throw new TableNotFoundException(
         tablePath.toString(), format("No delta files found in the directory: %s", logPath));
+  }
+
+  private static void publishExtendedLastCheckpoint(
+      LogSegment logSegment,
+      Optional<ExtendedLastCheckpoint> extendedLastCheckpointOpt,
+      Consumer<Optional<ExtendedLastCheckpoint>> consumer) {
+    Optional<ExtendedLastCheckpoint> usedExtendedLastCheckpoint =
+        extendedLastCheckpointOpt.filter(
+            extended ->
+                logSegment.getCheckpointVersionOpt().isPresent()
+                    && logSegment.getCheckpointVersionOpt().get() == extended.getVersion());
+    consumer.accept(usedExtendedLastCheckpoint);
   }
 
   /**
@@ -700,12 +745,23 @@ public class SnapshotManager {
    * backwards for a checkpoint).
    */
   private Optional<Long> getStartCheckpointVersion(
-      Engine engine, Optional<Long> timeTravelVersionOpt, Optional<Long> maxCatalogVersionOpt) {
+      Engine engine,
+      Optional<Long> timeTravelVersionOpt,
+      Optional<Long> maxCatalogVersionOpt,
+      boolean captureExtendedLastCheckpoint,
+      AtomicReference<Optional<ExtendedLastCheckpoint>> extendedLastCheckpointRef) {
     // This is a "latest" query, let's try to use the _last_checkpoint file if possible
     if (!timeTravelVersionOpt.isPresent()) {
       logger.info("Reading the _last_checkpoint file for 'latest' query");
-      Optional<Long> lastCheckpointFileVersionOpt =
-          new Checkpointer(logPath).readLastCheckpointFile(engine).map(x -> x.version);
+      Checkpointer checkpointer = new Checkpointer(logPath);
+      Optional<CheckpointMetaData> checkpointMetadataOpt =
+          checkpointer.readLastCheckpointFile(engine, captureExtendedLastCheckpoint);
+      Optional<Long> lastCheckpointFileVersionOpt = checkpointMetadataOpt.map(x -> x.version);
+      if (captureExtendedLastCheckpoint) {
+        Optional<ExtendedLastCheckpoint> extendedLastCheckpointOpt =
+            checkpointMetadataOpt.map(metadata -> (ExtendedLastCheckpoint) metadata);
+        extendedLastCheckpointRef.set(extendedLastCheckpointOpt);
+      }
 
       if (!lastCheckpointFileVersionOpt.isPresent()) {
         logger.info("No _last_checkpoint file found, default to listing from 0");

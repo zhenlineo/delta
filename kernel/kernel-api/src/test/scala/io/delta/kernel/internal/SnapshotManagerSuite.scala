@@ -22,6 +22,7 @@ import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
 
 import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
+import io.delta.kernel.ExtendedLastCheckpoint
 import io.delta.kernel.engine.FileReadResult
 import io.delta.kernel.exceptions.{InvalidTableException, TableNotFoundException}
 import io.delta.kernel.expressions.Predicate
@@ -458,6 +459,32 @@ class SnapshotManagerSuite extends AnyFunSuite with MockFileSystemClientUtils {
         expectedCheckpointVersion = Some(20),
         expectedLastCommitTimestamp = 240L)
     }
+  }
+
+  test("getLogSegmentForVersion: extended last checkpoint comes from the selecting read") {
+    val lastCheckpointVersion = 20L
+    val lastCheckpointFileStatus = FileStatus.of(s"$logPath/_last_checkpoint", 2, 2)
+    val files = deltaFileStatuses(0L to 24) ++
+      singularCheckpointFileStatuses(Seq(20L)) ++ Seq(lastCheckpointFileStatus)
+    val jsonHandler = new MockReadLastCheckpointFileJsonHandler(
+      lastCheckpointFileStatus.getPath,
+      lastCheckpointVersion)
+    var captured = Optional.empty[ExtendedLastCheckpoint]()
+
+    snapshotManager.getLogSegmentForVersion(
+      mockEngine(
+        jsonHandler = jsonHandler,
+        fileSystemClient = new MockListFromFileSystemClient(listFromProvider(files))),
+      Optional.empty(),
+      Collections.emptyList(),
+      Optional.empty(),
+      true,
+      value => captured = value)
+
+    assert(jsonHandler.readCount == 1)
+    assert(jsonHandler.lastReadSchema == CheckpointMetaData.READ_SCHEMA)
+    assert(captured.isPresent)
+    assert(captured.get().getVersion == lastCheckpointVersion)
   }
 
   test("getLogSegmentForVersion: multi-part and single-part checkpoints in same log") {
@@ -1156,16 +1183,21 @@ class MockReadLastCheckpointFileJsonHandler(
     lastCheckpointPath: String,
     lastCheckpointVersion: Long)
     extends BaseMockJsonHandler with VectorTestUtils {
+  var readCount = 0
+  var lastReadSchema: StructType = _
+
   override def readJsonFiles(
       fileIter: CloseableIterator[FileStatus],
       physicalSchema: StructType,
       predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
+    readCount += 1
+    lastReadSchema = physicalSchema
     assert(fileIter.hasNext)
     assert(fileIter.next.getPath == lastCheckpointPath)
 
     Utils.singletonCloseableIterator(
       new ColumnarBatch {
-        override def getSchema: StructType = CheckpointMetaData.READ_SCHEMA
+        override def getSchema: StructType = physicalSchema
 
         override def getColumnVector(ordinal: Int): ColumnVector = {
           // READ_SCHEMA: version, size, parts, sizeInBytes, numOfAddFiles, v2Checkpoint, checksum,
@@ -1174,6 +1206,8 @@ class MockReadLastCheckpointFileJsonHandler(
             case 0 => longVector(Seq(lastCheckpointVersion)) /* version */
             case 1 => longVector(Seq(100)) /* size */
             case 2 => longVector(Seq(1)) /* parts */
+            case 3 if physicalSchema == CheckpointMetaData.BASIC_READ_SCHEMA =>
+              mapTypeVector(Seq(Map.empty[String, String])) /* tags */
             case 3 => longVector(Seq(null.asInstanceOf[JLong])) /* sizeInBytes */
             case 4 => longVector(Seq(null.asInstanceOf[JLong])) /* numOfAddFiles */
             case 5 => // v2Checkpoint: an all-null struct vector
